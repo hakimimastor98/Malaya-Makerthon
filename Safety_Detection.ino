@@ -1,169 +1,135 @@
-#include <Wire.h>
-#include <SD.h>
-#include "MAX30100_PulseOximeter.h"
-#define BLYNK_PRINT Serial
-#include <Blynk.h>
-#include <ESP8266WiFi.h>
-#include <BlynkSimpleEsp8266.h>
-//scl d1,sda d2 one nodemcu
+#define BLYNK_PRINT Serial // Comment this out to disable prints and save space
+#include <SPI.h>;
+#include <ESP8266WiFi.h>;
+#include <BlynkSimpleEsp8266.h>;
+#include <SimpleTimer.h>;
+#include <DHT.h>;
+//will add flame detection module also
 
-#include "Wire.h"
-#include "Adafruit_GFX.h"
-#include "OakOLED.h"
+// You should get Auth Token in the Blynk App.
+// Go to the Project Settings (nut icon).
+char auth[] = "Dymaoy2x5-SOK5VjFeObLzGjKX6weWLO";
 
-#define REPORTING_PERIOD_MS 1000
-OakOLED oled;
-#define CS_PIN D8;
-char auth[] = "Dymaoy2x5-SOK5VjFeObLzGjKX6weWLO";             // You should get Auth Token in the Blynk App.
-char ssid[] = "Lord Kim";                                     // Your WiFi credentials.
+// Your WiFi credentials.
+// Set password to "" for open networks.
+char ssid[] = "Lord Kim";
 char pass[] = "hna12345";
+#define pin_switch D2
+#define DHTPIN D4 // What digital pin we're connected to
+#define ledPin D7
+#define pirPin D1
+#define buzzer D6
 
-// Connections : SCL PIN - D1 , SDA PIN - D2 , INT PIN - D0
-PulseOximeter pox;
+int pirValue;
+// Uncomment whatever type you're using!
+//#define DHTTYPE DHT11 // DHT 11
+#define DHTTYPE DHT22 // DHT 22, AM2302, AM2321
+//#define DHTTYPE DHT21 // DHT 21, AM2301
 
-float BPM, SpO2;
-uint32_t tsLastReport = 0;
+boolean oldSwitchState = LOW;
+boolean newSwitchState = LOW;
 
-const unsigned char bitmap [] PROGMEM=
+boolean detectstatus = LOW;
+
+DHT dht(DHTPIN, DHTTYPE);
+SimpleTimer timer;
+//int buzzer = D2;
+int smokey = A0;
+
+int sensorThres = 1000;
+
+// This function sends Arduino's up time every second to Virtual Pin (5, 6, 7 &amp;amp;amp;amp;amp;amp; 8).
+// In the app, Widget's reading frequency should be set to PUSH. This means
+// that you define how often to send data to Blynk App.
+void sendSensor()
 {
-0x00, 0x00, 0x00, 0x00, 0x01, 0x80, 0x18, 0x00, 0x0f, 0xe0, 0x7f, 0x00, 0x3f, 0xf9, 0xff, 0xc0,
-0x7f, 0xf9, 0xff, 0xc0, 0x7f, 0xff, 0xff, 0xe0, 0x7f, 0xff, 0xff, 0xe0, 0xff, 0xff, 0xff, 0xf0,
-0xff, 0xf7, 0xff, 0xf0, 0xff, 0xe7, 0xff, 0xf0, 0xff, 0xe7, 0xff, 0xf0, 0x7f, 0xdb, 0xff, 0xe0,
-0x7f, 0x9b, 0xff, 0xe0, 0x00, 0x3b, 0xc0, 0x00, 0x3f, 0xf9, 0x9f, 0xc0, 0x3f, 0xfd, 0xbf, 0xc0,
-0x1f, 0xfd, 0xbf, 0x80, 0x0f, 0xfd, 0x7f, 0x00, 0x07, 0xfe, 0x7e, 0x00, 0x03, 0xfe, 0xfc, 0x00,
-0x01, 0xff, 0xf8, 0x00, 0x00, 0xff, 0xf0, 0x00, 0x00, 0x7f, 0xe0, 0x00, 0x00, 0x3f, 0xc0, 0x00,
-0x00, 0x0f, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-};
+ float h = dht.readHumidity();
+ float t = dht.readTemperature(); // or dht.readTemperature(true) for Fahrenheit
 
-void onBeatDetected()
-{
-    Serial.println("Beat Detected!");
-    oled.drawBitmap( 60, 20, bitmap, 28, 28, 1);
-    oled.display();
+ if (isnan(h) || isnan(t)) {
+ Serial.println("Failed to read from DHT sensor!");
+ return;
+ }
+ // You can send any value at any time.
+ // Please don't send more that 10 values per second.
+ Blynk.virtualWrite(V2, h); // Humidity for gauge
+ Blynk.virtualWrite(V6, t); // Temperature for gauge
+ //Blynk.virtualWrite(V2, h); // Humidity for graph
+ //Blynk.virtualWrite(V8, t); // Temperature for graph
+
+ if(t > 50){
+    Blynk.email("@gmail.com", "House Fire Alert", "Temperature over 50!");
+    Blynk.notify("ESP8266 Alert - Temperature over 28C!");
+  }
 }
 
 void setup()
 {
-    Serial.begin(115200);
-    oled.begin();
-    oled.clearDisplay();
-    oled.setTextSize(1);
-    oled.setTextColor(1);
-    oled.setCursor(0, 0);
-
-    oled.println("Initializing pulse oximeter..");
-    oled.display();
-    
-    if (!SD.begin(CS_PIN)) {
-    Serial.println("sd card not ready.");
-    //programa encerrrado
-    return;
-  }
-   
-  //se chegou aqui é porque o cartão foi inicializado corretamente  
-  Serial.println("sd card ready.");
-    
-    pinMode(16, OUTPUT);
-    Blynk.begin(auth, ssid, pass);
-
-    Serial.print("Initializing Pulse Oximeter..");
-
-    if (!pox.begin())
-    {
-         Serial.println("FAILED");
-         oled.clearDisplay();
-         oled.setTextSize(1);
-         oled.setTextColor(1);
-         oled.setCursor(0, 0);
-         oled.println("FAILED");
-         oled.display();
-         for(;;);
-    }
-    else
-    {
-         oled.clearDisplay();
-         oled.setTextSize(1);
-         oled.setTextColor(1);
-         oled.setCursor(0, 0);
-         oled.println("SUCCESS");
-         oled.display();
-         Serial.println("SUCCESS");
-         pox.setOnBeatDetectedCallback(onBeatDetected);
-    }
-
-    // The default current for the IR LED is 50mA and it could be changed by uncommenting the following line.
-     //pox.setIRLedCurrent(MAX30100_LED_CURR_7_6MA);
-
+ Serial.begin(115200); // See the connection status in Serial Monitor
+ Blynk.begin(auth, ssid, pass);
+ pinMode(smokey, INPUT);
+pinMode(ledPin, OUTPUT);
+  pinMode(pirPin, INPUT);
+ //digitalWrite(ledPin, LOW);
+ dht.begin();
+pinMode(pin_switch, INPUT);
+pinMode(buzzer, OUTPUT);
+ // Setup a function to be called every second
+ timer.setInterval(1000L, sendSensor);
 }
-
+void detection(){
+   long state = digitalRead(pirPin);
+    if(state == HIGH) {
+      digitalWrite (ledPin, HIGH);
+      //Serial.println("Motion detected!");
+      tone(buzzer, 1000, 10000);
+      Blynk.notify("Intruder Alert");
+      delay(1000);
+    }
+    else {
+      digitalWrite (ledPin, LOW);
+     // Serial.println("Motion absent!");
+     noTone(buzzer);
+      delay(1000);
+      }
+  
+  }
 void loop()
 {
-    pox.update();
-    Blynk.run();
+ Blynk.run(); // Initiates Blynk
+ timer.run(); // Initiates SimpleTimer
 
+ int analogSensor = analogRead(smokey);
+ newSwitchState = digitalRead(pin_switch);
+ if(newSwitchState != oldSwitchState){
+  if(newSwitchState == HIGH){
+    if(detectstatus == LOW)
+    {detection();}
+    else{} 
     
-
-    BPM = pox.getHeartRate();
-    SpO2 = pox.getSpO2();
-    if (millis() - tsLastReport > REPORTING_PERIOD_MS)
-    {
-        Serial.print("Heart rate:");
-        Serial.print(BPM);
-        Serial.print(" bpm / SpO2:");
-        Serial.print(SpO2);
-        Serial.println(" %");
-
-        Blynk.virtualWrite(V7, BPM);
-        Blynk.virtualWrite(V8, SpO2);
-
-        if(BPM<10){
-          Blynk.notify("bahaya");
-          }
-        
-        
-        oled.clearDisplay();
-        oled.setTextSize(1);
-        oled.setTextColor(1);
-        oled.setCursor(0,16);
-        oled.println(pox.getHeartRate());
-
-        oled.setTextSize(1);
-        oled.setTextColor(1);
-        oled.setCursor(0, 0);
-        oled.println("Heart BPM");
-
-        oled.setTextSize(1);
-        oled.setTextColor(1);
-        oled.setCursor(0, 30);
-        oled.println("Spo2");
-
-        oled.setTextSize(1);
-        oled.setTextColor(1);
-        oled.setCursor(0,45);
-        oled.println(pox.getSpO2());
-        oled.display();
-
-        tsLastReport = millis();
-    }
-    //sd data log
-File dataFile = SD.open("LOG.txt", FILE_WRITE);
-  // se o arquivo foi aberto corretamente, escreve os dados nele
-  if (dataFile) {
-    Serial.println("success.");
-      //formatação no arquivo: linha a linha >> UMIDADE | TEMPERATURA
-      dataFile.print(BPM);
-      dataFile.print(" | ");
-      dataFile.println(SpO2);
- 
-      //fecha o arquivo após usá-lo
-      dataFile.close();
   }
-  // se o arquivo não pôde ser aberto os dados não serão gravados.
-  else {
-    Serial.println("Falha ao abrir o arquivo LOG.txt");//check translate latter
+  oldSwitchState = newSwitchState;
   }
- 
-  //intervalo de espera para uma nova leitura dos dados.
-  delay(2000);
+
+
+ Serial.print("Pin A0: ");
+ Serial.println(analogSensor);
+  Blynk.virtualWrite(A0,analogSensor);
+ // Checks if it has reached the threshold value
+ if (analogSensor > sensorThres)
+ {
+   tone(buzzer, 1000, 10000);
+   Blynk.notify("Alert: Fire in the House"); 
+   
+  // digitalWrite(buzzer, HIGH);
+  // delay(200);
+   //digitalWrite(buzzer, LOW);
+  //delay(200);
     
+ }
+ else
+ {
+   noTone(buzzer);
+ }
+ delay(100);
 }
